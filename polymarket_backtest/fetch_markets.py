@@ -10,7 +10,11 @@ from .config import GAMMA_BASE_URL, CACHE_DIR, MARKETS_TO_FETCH, REQUEST_TIMEOUT
 
 
 def fetch_all_markets(max_markets: int = MARKETS_TO_FETCH, batch_size: int = 100) -> list[dict]:
-    """Pull closed markets from Gamma API with pagination. Saves to JSONL cache."""
+    """Pull recently-closed markets from Gamma API with pagination.
+
+    Fetches newest-first (order=closedTime desc) because the CLOB only retains
+    price history for ~1 month of closed markets. Saves to JSONL cache.
+    """
     cache_path = CACHE_DIR / "markets_raw.jsonl"
 
     if cache_path.exists():
@@ -24,9 +28,10 @@ def fetch_all_markets(max_markets: int = MARKETS_TO_FETCH, batch_size: int = 100
         print(f"Loaded {len(markets)} cached markets")
         return markets
 
-    print(f"Fetching up to {max_markets} closed markets from Polymarket Gamma API...")
+    print(f"Fetching up to {max_markets} recently-closed markets (newest first)...")
     markets = []
     offset = 0
+    seen_ids = set()
 
     with tqdm(total=max_markets, desc="Fetching markets") as pbar:
         while len(markets) < max_markets:
@@ -37,6 +42,8 @@ def fetch_all_markets(max_markets: int = MARKETS_TO_FETCH, batch_size: int = 100
                         "closed": "true",
                         "limit": batch_size,
                         "offset": offset,
+                        "order": "closedTime",
+                        "ascending": "false",
                     },
                     timeout=REQUEST_TIMEOUT,
                 )
@@ -47,11 +54,22 @@ def fetch_all_markets(max_markets: int = MARKETS_TO_FETCH, batch_size: int = 100
                     print(f"\nNo more markets at offset {offset}")
                     break
 
-                markets.extend(batch)
-                pbar.update(len(batch))
+                # Deduplicate
+                new = 0
+                for m in batch:
+                    mid = m.get("id") or m.get("conditionId")
+                    if mid and mid not in seen_ids:
+                        seen_ids.add(mid)
+                        markets.append(m)
+                        new += 1
+
+                pbar.update(new)
                 offset += batch_size
 
-                # Rate limiting
+                if new == 0:
+                    print(f"\nAll duplicates at offset {offset}, stopping")
+                    break
+
                 time.sleep(0.3)
 
             except requests.exceptions.RequestException as e:
@@ -61,7 +79,6 @@ def fetch_all_markets(max_markets: int = MARKETS_TO_FETCH, batch_size: int = 100
 
     markets = markets[:max_markets]
 
-    # Save to JSONL cache
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with open(cache_path, "w", encoding="utf-8") as f:
         for m in markets:
