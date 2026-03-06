@@ -67,7 +67,7 @@ ENTRY_DAYS_BEFORE = [14, 7, 5, 3]
 EXIT_DAYS_BEFORE = [2, 1, 0]
 
 # Data
-MARKETS_TO_FETCH = 100000
+MARKETS_TO_FETCH = 750000
 CACHE_DIR = Path("./cache")
 OUTPUT_DIR = Path("./output")
 
