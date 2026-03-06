@@ -80,7 +80,12 @@ def _find_exit_on_move(
 
     for p in post_entry:
         if abs(p["price"] - entry_price) >= threshold:
-            return p["price"], p["date"], "threshold_hit"
+            # Cap exit at exactly ±threshold (limit order behavior)
+            if p["price"] > entry_price:
+                capped_price = entry_price + threshold
+            else:
+                capped_price = entry_price - threshold
+            return round(capped_price, 4), p["date"], "threshold_hit"
 
     # No threshold hit — exit at last available price before deadline
     if post_entry:

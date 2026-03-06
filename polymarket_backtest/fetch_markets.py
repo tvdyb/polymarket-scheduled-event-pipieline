@@ -88,7 +88,18 @@ def fetch_all_markets(max_markets: int = MARKETS_TO_FETCH, batch_size: int = 100
     return markets
 
 
-def parse_market(raw: dict) -> dict:
+def count_event_group_sizes(raw_markets: list[dict]) -> dict[str, int]:
+    """Pre-pass: count how many markets share each event ID."""
+    counts: dict[str, int] = {}
+    for m in raw_markets:
+        for e in m.get("events", []):
+            eid = e.get("id")
+            if eid:
+                counts[eid] = counts.get(eid, 0) + 1
+    return counts
+
+
+def parse_market(raw: dict, event_group_sizes: dict[str, int] | None = None) -> dict:
     """Extract the fields we need from a raw Gamma API market object."""
     # Parse volume/liquidity safely
     volume = 0.0
@@ -133,6 +144,14 @@ def parse_market(raw: dict) -> dict:
     if outcome is None and final_price is not None:
         outcome = "YES" if final_price > 0.5 else "NO"
 
+    # Determine event group size (how many sibling markets share the same event)
+    group_size = 1
+    if event_group_sizes:
+        for e in raw.get("events", []):
+            eid = e.get("id")
+            if eid and eid in event_group_sizes:
+                group_size = max(group_size, event_group_sizes[eid])
+
     return {
         "id": str(raw.get("id") or raw.get("conditionId") or ""),
         "condition_id": str(raw.get("conditionId") or ""),
@@ -148,5 +167,6 @@ def parse_market(raw: dict) -> dict:
         "final_price": final_price,
         "clob_token_ids": clob_token_ids,
         "slug": raw.get("slug") or "",
+        "event_group_size": group_size,
         "_raw": raw,  # keep raw for LLM context
     }

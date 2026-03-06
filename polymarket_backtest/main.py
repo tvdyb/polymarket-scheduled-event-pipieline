@@ -5,7 +5,7 @@ import json
 import sys
 
 from .config import ensure_dirs, CACHE_DIR, OUTPUT_DIR
-from .fetch_markets import fetch_all_markets, parse_market
+from .fetch_markets import fetch_all_markets, parse_market, count_event_group_sizes
 from .llm_filter import run_filter_pipeline
 from .price_data import fetch_prices_for_markets
 from .backtest import run_backtest
@@ -18,7 +18,8 @@ def step_fetch():
     print("PHASE 1: Fetching historic markets")
     print("=" * 60)
     raw_markets = fetch_all_markets()
-    markets = [parse_market(m) for m in raw_markets]
+    event_sizes = count_event_group_sizes(raw_markets)
+    markets = [parse_market(m, event_sizes) for m in raw_markets]
     # Save parsed markets
     parsed_path = CACHE_DIR / "markets_parsed.jsonl"
     with open(parsed_path, "w", encoding="utf-8") as f:

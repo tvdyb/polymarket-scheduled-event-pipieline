@@ -67,6 +67,11 @@ def hard_filter(market: dict) -> bool:
     if market.get("volume", 0) < MIN_VOLUME:
         return False
 
+    # Filter out multi-outcome/contestant markets (e.g. "Will X win Best Actress?"
+    # where 10+ nominees each have their own contract — most must go to zero)
+    if market.get("event_group_size", 1) > 2:
+        return False
+
     return True
 
 
