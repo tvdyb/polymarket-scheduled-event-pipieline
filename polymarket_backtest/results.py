@@ -144,7 +144,7 @@ def export_csv(all_results: dict[str, list[dict]], combo: str = "(7,1)"):
     csv_path = OUTPUT_DIR / f"trades_{combo.replace('(','').replace(')','').replace(',','_')}.csv"
     fieldnames = [
         "market_id", "question", "event_type", "event_date",
-        "entry_date", "exit_date", "entry_price", "exit_price",
+        "entry_date", "exit_date", "exit_reason", "entry_price", "exit_price",
         "pnl", "pct_return", "resolution_outcome",
         "observed_pre_entry_std", "llm_confidence", "llm_reasoning", "category",
     ]

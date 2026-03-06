@@ -1,10 +1,16 @@
-"""Phase 4: Backtest logic — entry/exit on calendar dates, PnL calculation."""
+"""Phase 4: Backtest logic — entry/exit on calendar dates, PnL calculation.
+
+Exit rule: sell as soon as price moves 5 cents in either direction from entry.
+This prevents holding through resolution where prices snap to 0 or 1.
+"""
 
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
 from .config import ENTRY_DAYS_BEFORE, EXIT_DAYS_BEFORE
+
+EXIT_MOVE_THRESHOLD = 0.05  # sell when price moves this far from entry
 
 
 def _parse_date(s) -> datetime | None:
@@ -58,6 +64,32 @@ def compute_observed_vol(prices: list[dict], entry_date: str) -> float | None:
     return pd.Series(pre_entry).std()
 
 
+def _find_exit_on_move(
+    prices: list[dict],
+    entry_date: str,
+    entry_price: float,
+    deadline_date: str,
+    threshold: float = EXIT_MOVE_THRESHOLD,
+) -> tuple[float | None, str | None, str]:
+    """Scan forward from entry_date for the first price that moves ±threshold from entry_price.
+
+    If no move hits before deadline_date, exit at last price before deadline.
+    Returns (exit_price, exit_date, exit_reason).
+    """
+    post_entry = [p for p in prices if p["date"] >= entry_date and p["date"] <= deadline_date]
+
+    for p in post_entry:
+        if abs(p["price"] - entry_price) >= threshold:
+            return p["price"], p["date"], "threshold_hit"
+
+    # No threshold hit — exit at last available price before deadline
+    if post_entry:
+        last = post_entry[-1]
+        return last["price"], last["date"], "deadline"
+
+    return None, None, "no_data"
+
+
 def run_backtest(
     markets: list[dict],
     prices: dict[str, list[dict]],
@@ -66,6 +98,9 @@ def run_backtest(
 ) -> dict[str, list[dict]]:
     """Run backtest for all (N, M) entry/exit day combinations.
 
+    Exit rule: sell as soon as price moves ±5c from entry, or at M days
+    before event if no move occurs.
+
     Returns dict mapping "(N,M)" -> list of trade dicts.
     """
     all_results = {}
@@ -73,7 +108,7 @@ def run_backtest(
     for n_entry in entry_days_list:
         for m_exit in exit_days_list:
             if m_exit >= n_entry:
-                continue  # exit must be before entry
+                continue
 
             combo_key = f"({n_entry},{m_exit})"
             trades = []
@@ -85,7 +120,6 @@ def run_backtest(
                 if not price_history:
                     continue
 
-                # Determine event date: prefer LLM-extracted, fall back to end_date
                 llm_data = market.get("_llm", {})
                 event_date_str = llm_data.get("event_date")
                 if not event_date_str:
@@ -97,45 +131,32 @@ def run_backtest(
 
                 event_date_clean = event_dt.strftime("%Y-%m-%d")
 
-                # Check minimum price history length
                 if len(price_history) < n_entry + 3:
                     continue
 
-                # Calculate entry and exit dates
+                # Entry
                 entry_dt = event_dt - timedelta(days=n_entry)
                 entry_date_target = entry_dt.strftime("%Y-%m-%d")
-
-                if m_exit == 0:
-                    # Hold to resolution — use final price or last available
-                    exit_date_target = event_date_clean
-                else:
-                    exit_dt = event_dt - timedelta(days=m_exit)
-                    exit_date_target = exit_dt.strftime("%Y-%m-%d")
-
-                # Find prices
                 entry_price, actual_entry_date = _find_price_on_date(price_history, entry_date_target)
                 if entry_price is None or entry_price <= 0:
                     continue
 
-                exit_price, actual_exit_date = _find_price_on_date(price_history, exit_date_target)
-                if exit_price is None:
-                    # Fall back to final resolution price
-                    if market.get("final_price") is not None:
-                        exit_price = market["final_price"]
-                        actual_exit_date = event_date_clean
-                    else:
-                        # Use last available price
-                        if price_history:
-                            exit_price = price_history[-1]["price"]
-                            actual_exit_date = price_history[-1]["date"]
-                        else:
-                            continue
+                # Deadline: M days before event (or event date if M=0)
+                if m_exit == 0:
+                    deadline_date = event_date_clean
+                else:
+                    deadline_date = (event_dt - timedelta(days=m_exit)).strftime("%Y-%m-%d")
 
-                # PnL
+                # Exit: first ±5c move, or deadline price
+                exit_price, actual_exit_date, exit_reason = _find_exit_on_move(
+                    price_history, actual_entry_date, entry_price, deadline_date,
+                )
+                if exit_price is None:
+                    continue
+
                 pnl = exit_price - entry_price
                 pct_return = (exit_price - entry_price) / entry_price
 
-                # Observed vol diagnostic
                 obs_vol = compute_observed_vol(price_history, actual_entry_date or entry_date_target)
 
                 trade = {
@@ -145,6 +166,7 @@ def run_backtest(
                     "event_date": event_date_clean,
                     "entry_date": actual_entry_date,
                     "exit_date": actual_exit_date,
+                    "exit_reason": exit_reason,
                     "entry_price": round(entry_price, 4),
                     "exit_price": round(exit_price, 4),
                     "pnl": round(pnl, 4),
