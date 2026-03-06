@@ -49,12 +49,13 @@ class LiquidityReversionStrategy(Strategy):
             expired = trade.timestamp - fade["entry_ts"] > self.max_hold
 
             if hit_target or expired:
+                exit_price = (1.0 - trade.price) if side == "NO" else trade.price
                 signals.append({
                     "action": "SELL",
                     "market_id": trade.market_id,
                     "side": side,
                     "qty": fade["qty"],
-                    "price": trade.price,
+                    "price": exit_price,
                 })
                 del self._fades[trade.market_id]
 

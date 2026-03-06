@@ -40,18 +40,35 @@ class TradeEvent:
     taker: str = ""
 
 
+@dataclass
+class _WindowAccum:
+    """Incremental accumulator for a time window."""
+    total_size: float = 0.0
+    total_notional: float = 0.0
+    count: int = 0
+
+
 class MarketState:
-    """Tracks per-market state from streaming trade events."""
+    """Tracks per-market state from streaming trade events.
+
+    Uses incremental accumulators instead of recomputing from deque each time.
+    """
 
     def __init__(self, window_seconds: int = 86400):
         self._window = window_seconds  # 24h default
-        self._trades: dict[str, deque[TradeEvent]] = defaultdict(deque)
+        # Per-market deques for eviction, keyed by (market_id, window_secs)
+        self._trades_1h: dict[str, deque] = defaultdict(deque)
+        self._trades_4h: dict[str, deque] = defaultdict(deque)
+        self._trades_24h: dict[str, deque] = defaultdict(deque)
+        # Incremental accumulators
+        self._acc_1h: dict[str, _WindowAccum] = defaultdict(_WindowAccum)
+        self._acc_4h: dict[str, _WindowAccum] = defaultdict(_WindowAccum)
+        self._acc_24h: dict[str, _WindowAccum] = defaultdict(_WindowAccum)
         self._snapshots: dict[str, MarketSnapshot] = {}
-        self._market_meta: dict[str, dict] = {}  # market_id -> {resolution_ts, category, resolution}
+        self._market_meta: dict[str, dict] = {}
 
     def register_market(self, market_id: str, resolution_ts: int | None = None,
                         category: str = "", resolution: str | None = None):
-        """Register market metadata (call before processing trades)."""
         self._market_meta[market_id] = {
             "resolution_ts": resolution_ts,
             "category": category,
@@ -59,17 +76,55 @@ class MarketState:
         }
 
     def on_trade(self, trade: TradeEvent) -> MarketSnapshot:
-        """Process a new trade event and return updated market snapshot."""
-        q = self._trades[trade.market_id]
-        q.append(trade)
+        mid = trade.market_id
+        ts = trade.timestamp
+        notional = trade.price * trade.size
 
-        # Evict old trades outside window
-        cutoff = trade.timestamp - self._window
-        while q and q[0].timestamp < cutoff:
-            q.popleft()
+        # Add to all windows
+        entry = (ts, trade.price, trade.size, notional, trade.taker_side)
 
-        snap = self._build_snapshot(trade.market_id, trade.timestamp)
-        self._snapshots[trade.market_id] = snap
+        for deq, acc, window_secs in [
+            (self._trades_1h[mid], self._acc_1h[mid], 3600),
+            (self._trades_4h[mid], self._acc_4h[mid], 14400),
+            (self._trades_24h[mid], self._acc_24h[mid], 86400),
+        ]:
+            deq.append(entry)
+            acc.total_size += trade.size
+            acc.total_notional += notional
+            acc.count += 1
+
+            # Evict old entries
+            cutoff = ts - window_secs
+            while deq and deq[0][0] < cutoff:
+                old = deq.popleft()
+                acc.total_size -= old[2]
+                acc.total_notional -= old[3]
+                acc.count -= 1
+
+        # Build snapshot from accumulators (O(1))
+        meta = self._market_meta.get(mid, {})
+        a1 = self._acc_1h[mid]
+        a4 = self._acc_4h[mid]
+        a24 = self._acc_24h[mid]
+
+        snap = MarketSnapshot(
+            market_id=mid,
+            last_price=trade.price,
+            last_trade_ts=ts,
+            volume_1h=a1.total_size,
+            volume_4h=a4.total_size,
+            volume_24h=a24.total_size,
+            vwap_1h=a1.total_notional / a1.total_size if a1.total_size > 0 else trade.price,
+            vwap_4h=a4.total_notional / a4.total_size if a4.total_size > 0 else trade.price,
+            vwap_24h=a24.total_notional / a24.total_size if a24.total_size > 0 else trade.price,
+            trade_count_1h=a1.count,
+            spread_estimate=0.02,
+            resolution_ts=meta.get("resolution_ts"),
+            category=meta.get("category", ""),
+            resolution=meta.get("resolution"),
+        )
+
+        self._snapshots[mid] = snap
         return snap
 
     def get_snapshot(self, market_id: str) -> MarketSnapshot | None:
@@ -77,50 +132,3 @@ class MarketState:
 
     def get_all_snapshots(self) -> dict[str, MarketSnapshot]:
         return dict(self._snapshots)
-
-    def _build_snapshot(self, market_id: str, now: int) -> MarketSnapshot:
-        trades = self._trades[market_id]
-        meta = self._market_meta.get(market_id, {})
-
-        snap = MarketSnapshot(
-            market_id=market_id,
-            resolution_ts=meta.get("resolution_ts"),
-            category=meta.get("category", ""),
-            resolution=meta.get("resolution"),
-        )
-
-        if not trades:
-            return snap
-
-        last = trades[-1]
-        snap.last_price = last.price
-        snap.last_trade_ts = last.timestamp
-
-        # Compute VWAP and volume for different windows
-        for window_secs, attr_vol, attr_vwap, attr_count in [
-            (3600, "volume_1h", "vwap_1h", "trade_count_1h"),
-            (14400, "volume_4h", "vwap_4h", None),
-            (86400, "volume_24h", "vwap_24h", None),
-        ]:
-            cutoff = now - window_secs
-            total_notional = 0.0
-            total_size = 0.0
-            count = 0
-            for t in trades:
-                if t.timestamp >= cutoff:
-                    total_notional += t.price * t.size
-                    total_size += t.size
-                    count += 1
-            setattr(snap, attr_vol, total_size)
-            if total_size > 0:
-                setattr(snap, attr_vwap, total_notional / total_size)
-            if attr_count:
-                setattr(snap, attr_count, count)
-
-        # Estimate spread from recent buy/sell prices
-        recent_buys = [t.price for t in trades if t.taker_side == "BUY" and t.timestamp >= now - 3600]
-        recent_sells = [t.price for t in trades if t.taker_side == "SELL" and t.timestamp >= now - 3600]
-        if recent_buys and recent_sells:
-            snap.spread_estimate = max(0.01, max(recent_buys) - min(recent_sells))
-
-        return snap

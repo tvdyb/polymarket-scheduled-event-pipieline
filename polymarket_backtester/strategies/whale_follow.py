@@ -64,9 +64,9 @@ class WhaleFollowStrategy(Strategy):
                 })
                 del self._active[trade.market_id]
 
-        # Detect whale trades
-        if trade.taker in self.whale_addrs or trade.maker in self.whale_addrs:
-            if trade.size >= self.min_size:
+        # Detect whale trades by address OR by size alone
+        is_whale = (trade.taker in self.whale_addrs or trade.maker in self.whale_addrs) if self.whale_addrs else True
+        if is_whale and trade.size >= self.min_size:
                 whale_side = "YES" if trade.taker_side == "BUY" else "NO"
                 self._pending.append({
                     "market_id": trade.market_id,

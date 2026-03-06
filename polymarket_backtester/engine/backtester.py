@@ -29,6 +29,7 @@ class Backtester:
         initial_cash: float = 10_000.0,
         slippage_cents: float = 0.01,
         max_position_usd: float = 500.0,
+        max_open_positions: int = 20,
         tick_interval_seconds: int = 300,  # on_tick every 5 min
         equity_snapshot_interval: int = 3600,  # snapshot every 1h
     ):
@@ -37,6 +38,7 @@ class Backtester:
         self.market_state = MarketState()
         self.slippage_cents = slippage_cents
         self.max_position_usd = max_position_usd
+        self.max_open_positions = max_open_positions
         self.tick_interval = tick_interval_seconds
         self.equity_interval = equity_snapshot_interval
 
@@ -48,7 +50,16 @@ class Backtester:
             closed_time = row.get("closedTime") or row.get("endDate")
             if closed_time:
                 try:
-                    resolution_ts = int(pl.Series([closed_time]).str.to_datetime("%Y-%m-%dT%H:%M:%S%.fZ").dt.epoch("s")[0])
+                    from datetime import datetime, timezone
+                    ct = str(closed_time).strip()
+                    # Strip timezone suffix, parse as UTC
+                    for tz_suffix in ("+00:00", "+00", "Z"):
+                        if ct.endswith(tz_suffix):
+                            ct = ct[:-len(tz_suffix)]
+                            break
+                    # Parse up to seconds (ignore fractional)
+                    dt = datetime.strptime(ct[:19], "%Y-%m-%d %H:%M:%S")
+                    resolution_ts = int(dt.replace(tzinfo=timezone.utc).timestamp())
                 except Exception:
                     pass
 
@@ -161,6 +172,9 @@ class Backtester:
             slippage = self.slippage_cents
 
             if action == "BUY":
+                # Limit concurrent open positions
+                if len(self.portfolio.positions) >= self.max_open_positions:
+                    continue
                 self.portfolio.buy(
                     market_id, side, qty, price, timestamp,
                     slippage=slippage, strategy=self.strategy.name,
