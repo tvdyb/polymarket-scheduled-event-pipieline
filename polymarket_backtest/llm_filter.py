@@ -89,6 +89,33 @@ def hard_filter(market: dict) -> bool:
     if any(kw in text for kw in ELECTION_KEYWORDS):
         return False
 
+    # ── "Anytime before deadline" filter ─────────────────────────────────────
+    # Markets with "by [date]" or "before [date]" can spike at any random moment.
+    # No predictable quiet window to exploit.
+    if re.search(r"\bby\b\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december|\d{4}|q[1-4]|end of|year|month)", question):
+        return False
+    if re.search(r"\bbefore\b\s+\w+", question):
+        return False
+    # "in 2025/2026" open-ended occurrence
+    if re.search(r"\bin\s+20\d{2}\s*\??$", question):
+        return False
+
+    # Price target / "will reach" / "will hit" / "dip to" — can move any moment
+    if re.search(r"\b(hit|reach|above|below|dip to|drop to|fall to|rise to|climb to)\b\s+\$?[\d.,]+", question):
+        return False
+
+    # Price in month/year: "Will X reach Y in March?" / "in 2026"
+    if re.search(r"\$[\d.,]+\s+in\s+(january|february|march|april|may|june|july|august|september|october|november|december|\d{4})", question):
+        return False
+
+    # Geopolitical "can happen any day" patterns
+    if re.search(r"\b(strike|attack|invade|capture|bomb|arrest|resign|oust|fire|impeach|indict|assassin)", question):
+        return False
+
+    # "Up or Down" / candle markets
+    if "up or down" in question:
+        return False
+
     # ── Multi-outcome structural filter ─────────────────────────────────────
     # If >2 contracts share the same event, it's a competitive multi-outcome market
     if market.get("event_group_size", 1) > MAX_EVENT_GROUP_SIZE:
@@ -112,42 +139,51 @@ def hard_filter(market: dict) -> bool:
 
 SYSTEM_PROMPT = """You are a prediction market analyst filtering contracts for a specific trading strategy.
 
-We want SCHEDULED BINARY EVENT contracts where:
-- The contract resolves based on ONE specific event (not ongoing/continuous outcomes)
-- The price can trend monotonically upward as the event approaches
-- Evidence accumulates over time pushing the price toward 1.00
-- The contract is NOT constrained by competing sibling contracts
+We want contracts that resolve on a SPECIFIC KNOWN DATE based on a SCHEDULED EVENT — where \
+nothing price-moving happens until that date arrives. The key insight: we buy N days before \
+the scheduled event and the price should be STABLE/BORING until the event occurs.
 
-INCLUDE these types:
-- Threshold/milestone: "Will Bitcoin hit $100K before July 2026?", "Will US GDP exceed 3%?"
-- Policy/regulatory: "Will the Fed cut rates in June?", "Will X bill pass the Senate?"
-- Occurrence: "Will there be a Category 5 hurricane in 2026?", "Will X announce layoffs?"
-- Deadline-based: "Will X happen before Y date?" where evidence accumulates toward resolution
-- Niche scheduled events: "Will Kim K pass the bar exam?", "Will X movie gross over $Y?"
+CRITICAL DISTINCTION — "scheduled date" vs "anytime before deadline":
+- GOOD: "Will X beat quarterly earnings?" — earnings report is on a specific date, nothing \
+happens until that date. Price is stable, then moves on earnings day.
+- GOOD: "Will the Senate vote on X bill on March 15?" — vote is scheduled, price is stable until then.
+- BAD: "Will Bitcoin hit $100K before July?" — Bitcoin can spike ANY DAY creating sudden vol. \
+There is no quiet period to exploit.
+- BAD: "Will GTA6 cost over $100?" — the announcement can come any time.
+- BAD: "Will X be arrested by March 31?" — arrest can happen any day, no predictable quiet window.
+- BAD: "Will there be a Category 5 hurricane in 2026?" — can happen any time during the season.
+- BAD: "Will S&P 500 hit $6,800 in March?" — price can move any moment.
+- BAD: "Will Israel strike Gaza on March 1?" — geopolitical event, unpredictable timing.
 
-EXCLUDE these types:
-- Sports: Any match, game, score, player stat, tournament result
-- Awards with multiple nominees: "Will X win Best Picture?" — zero-sum across nominee contracts
-- Elections with multiple candidates: "Will X win the primary?" — linked candidate contracts
-- "Who will win/be chosen" markets with enumerated options
-- Markets that are part of a multi-option slate (multiple contracts under same event where one winning forces others to lose)
-- Continuous price tracking: "Up or Down" markets, 5-minute candle markets
+The test: "Is there a specific scheduled date where all the action happens, with a predictable \
+quiet/stable period before it?" If the triggering event can happen at ANY RANDOM TIME before \
+the deadline, EXCLUDE it.
 
-Also estimate the EVENT DATE (when the underlying event resolves, not the market close date).
+INCLUDE:
+- Scheduled data releases: earnings reports, economic data releases (GDP, jobs report on known date)
+- Scheduled votes/decisions: congressional votes, court rulings on specific docket dates, Fed meetings
+- Scheduled events with known dates: product launches on announced dates, award ceremonies, exams
+- Regulatory deadlines: "Will FDA approve X by the PDUFA date?" (PDUFA date is known and scheduled)
+
+EXCLUDE:
+- "Before/by" deadline markets where the event can happen any time: price targets, arrests, \
+resignations, wars, natural disasters, "will X reach Y", "will X happen by Z"
+- Sports, awards with nominees, elections with candidates
+- Continuous tracking: "Up or Down", 5-minute candles
+- Markets where the underlying can move at any random moment
 
 Respond in JSON only:
 {
-  "is_single_event": true/false,
-  "has_monotonic_potential": true/false,
-  "is_competitive_multioutcome": true/false,
+  "has_scheduled_date": true/false,
+  "is_stable_before_event": true/false,
   "include_in_strategy": true/false,
   "event_date": "YYYY-MM-DD or null",
-  "event_type": "threshold|policy|occurrence|deadline|announcement|other|null",
+  "event_type": "earnings|data_release|scheduled_vote|court_ruling|product_launch|regulatory|other|null",
   "reasoning": "one sentence max",
   "confidence": 0.0-1.0
 }
 
-include_in_strategy = is_single_event AND has_monotonic_potential AND NOT is_competitive_multioutcome"""
+include_in_strategy = has_scheduled_date AND is_stable_before_event. Be STRICT — when in doubt, exclude."""
 
 
 MAX_CONCURRENT = 100
