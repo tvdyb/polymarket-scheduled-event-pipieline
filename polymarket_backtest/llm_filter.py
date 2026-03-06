@@ -68,8 +68,10 @@ def hard_filter(market: dict) -> bool:
         return False
 
     # Filter out multi-outcome/contestant markets (e.g. "Will X win Best Actress?"
-    # where 10+ nominees each have their own contract — most must go to zero)
-    if market.get("event_group_size", 1) > 2:
+    # where many nominees each have their own contract — most must go to zero)
+    # Threshold at 5: catches large nominee pools while keeping legitimate markets
+    # that happen to share an event group with a few related markets
+    if market.get("event_group_size", 1) > 5:
         return False
 
     return True
