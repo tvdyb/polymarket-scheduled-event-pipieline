@@ -1,11 +1,14 @@
 """Phase 2: Filter pipeline — hard rules + DeepSeek LLM classification.
 
 All filtering happens BEFORE any price data is fetched. This is the lookahead firewall.
+
+Targets: scheduled binary event contracts with monotonic price potential.
+Excludes: sports, multi-outcome competitive markets, awards, elections.
 """
 
 import asyncio
 import json
-import time
+import re
 from datetime import datetime, timezone
 
 import openai
@@ -13,8 +16,11 @@ from tqdm import tqdm
 
 from .config import (
     SPORTS_KEYWORDS,
+    AWARDS_KEYWORDS,
+    ELECTION_KEYWORDS,
     MIN_VOLUME,
     MIN_TRADING_DAYS,
+    MAX_EVENT_GROUP_SIZE,
     LLM_CONFIDENCE_THRESHOLD,
     DEEPSEEK_API_KEY,
     DEEPSEEK_MODEL,
@@ -53,25 +59,50 @@ def _parse_date(s) -> datetime | None:
 
 
 def hard_filter(market: dict) -> bool:
-    """Cheap keyword + heuristic filters. Returns True if market passes."""
-    text = (market["question"] + " " + market.get("category", "")).lower()
+    """Multi-layer keyword + structural filters. Returns True if market passes."""
+    text = (market["question"] + " " + market.get("description", "") + " " + market.get("category", "")).lower()
+    question = market["question"].lower()
+
+    # ── Sports filter ───────────────────────────────────────────────────────
     if any(kw in text for kw in SPORTS_KEYWORDS):
         return False
 
+    # Category-level sports filter
+    cat = market.get("category", "").lower()
+    if cat in ("sports", "football", "soccer", "basketball", "baseball", "hockey",
+               "tennis", "cricket", "mma", "nascar", "f1", "golf", "esports"):
+        return False
+
+    # Pattern: "Will [Team] win on YYYY-MM-DD?" — sports match result
+    if re.search(r"will .+ win on \d{4}-\d{2}-\d{2}", question):
+        return False
+
+    # Pattern: "[Team] vs [Team]" anywhere in question
+    if re.search(r"\w+ vs\.? \w+", question) and ("win" in question or "draw" in question or "score" in question):
+        return False
+
+    # ── Awards/competition filter ───────────────────────────────────────────
+    if any(kw in text for kw in AWARDS_KEYWORDS):
+        return False
+
+    # ── Election/multi-candidate filter ─────────────────────────────────────
+    if any(kw in text for kw in ELECTION_KEYWORDS):
+        return False
+
+    # ── Multi-outcome structural filter ─────────────────────────────────────
+    # If >2 contracts share the same event, it's a competitive multi-outcome market
+    if market.get("event_group_size", 1) > MAX_EVENT_GROUP_SIZE:
+        return False
+
+    # ── Minimum trading window ──────────────────────────────────────────────
     start = _parse_date(market.get("start_date"))
     end = _parse_date(market.get("end_date"))
     if start and end:
         if (end - start).days < MIN_TRADING_DAYS:
             return False
 
+    # ── Minimum volume ──────────────────────────────────────────────────────
     if market.get("volume", 0) < MIN_VOLUME:
-        return False
-
-    # Filter out multi-outcome/contestant markets (e.g. "Will X win Best Actress?"
-    # where many nominees each have their own contract — most must go to zero)
-    # Threshold at 5: catches large nominee pools while keeping legitimate markets
-    # that happen to share an event group with a few related markets
-    if market.get("event_group_size", 1) > 5:
         return False
 
     return True
@@ -79,55 +110,47 @@ def hard_filter(market: dict) -> bool:
 
 # ── Step 2b: LLM Classification ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a prediction market analyst evaluating whether a market fits a specific \
-trading strategy: buying markets for obscure, hard-dated events that most traders \
-ignore until the event actually happens.
+SYSTEM_PROMPT = """You are a prediction market analyst filtering contracts for a specific trading strategy.
 
-Given a market question and description, determine:
+We want SCHEDULED BINARY EVENT contracts where:
+- The contract resolves based on ONE specific event (not ongoing/continuous outcomes)
+- The price can trend monotonically upward as the event approaches
+- Evidence accumulates over time pushing the price toward 1.00
+- The contract is NOT constrained by competing sibling contracts
 
-1. SCHEDULED EVENT: Does this resolve based on a specific scheduled event with a \
-known date — like an exam, hearing, product launch, award ceremony, court date, \
-or scheduled announcement? The key is that the event date is KNOWABLE IN ADVANCE. \
-NOT "will X happen eventually" but "will X happen ON a specific known occasion."
+INCLUDE these types:
+- Threshold/milestone: "Will Bitcoin hit $100K before July 2026?", "Will US GDP exceed 3%?"
+- Policy/regulatory: "Will the Fed cut rates in June?", "Will X bill pass the Senate?"
+- Occurrence: "Will there be a Category 5 hurricane in 2026?", "Will X announce layoffs?"
+- Deadline-based: "Will X happen before Y date?" where evidence accumulates toward resolution
+- Niche scheduled events: "Will Kim K pass the bar exam?", "Will X movie gross over $Y?"
 
-2. LOW ATTENTION: Would this market likely be IGNORED by most traders before the \
-event? Niche celebrity events, obscure legal proceedings, minor product launches, \
-reality TV outcomes — things that only become salient right before they happen. \
-Exclude markets that are inherently high-attention (major elections, Fed decisions, \
-big IPOs, anything financial professionals actively track).
+EXCLUDE these types:
+- Sports: Any match, game, score, player stat, tournament result
+- Awards with multiple nominees: "Will X win Best Picture?" — zero-sum across nominee contracts
+- Elections with multiple candidates: "Will X win the primary?" — linked candidate contracts
+- "Who will win/be chosen" markets with enumerated options
+- Markets that are part of a multi-option slate (multiple contracts under same event where one winning forces others to lose)
+- Continuous price tracking: "Up or Down" markets, 5-minute candle markets
 
-3. EVENT DATE: Your best estimate of when the underlying event occurs (not the \
-market resolution close date, which is often days later).
+Also estimate the EVENT DATE (when the underlying event resolves, not the market close date).
 
-Respond in JSON only — no preamble, no explanation outside the JSON:
+Respond in JSON only:
 {
-  "is_scheduled_event": true/false,
-  "is_low_attention": true/false,
+  "is_single_event": true/false,
+  "has_monotonic_potential": true/false,
+  "is_competitive_multioutcome": true/false,
   "include_in_strategy": true/false,
   "event_date": "YYYY-MM-DD or null",
-  "event_type": "exam|hearing|launch|award|court|announcement|other|null",
+  "event_type": "threshold|policy|occurrence|deadline|announcement|other|null",
   "reasoning": "one sentence max",
   "confidence": 0.0-1.0
 }
 
-include_in_strategy should be true only if BOTH is_scheduled_event AND is_low_attention are true.
-
-Examples of markets to INCLUDE (include_in_strategy: true):
-- "Will Kim Kardashian pass the California bar exam?" → Scheduled exam date, celebrity but niche legal event, ignored until results day
-- "Will Olivia Rodrigo win Best New Artist at the Grammys?" → Award ceremony has a fixed date, pop culture not finance-tracked
-- "Will [person] be sworn in as [position] on January 20th?" → Scheduled inauguration, date is known
-- "Will the Supreme Court rule on [case] before June recess?" → Court calendar is scheduled, legal niche
-- "Will [movie] gross over $X in its opening weekend?" → Release date is fixed, entertainment niche
-
-Examples of markets to EXCLUDE (include_in_strategy: false):
-- "Will the Fed raise rates at the March FOMC meeting?" → Scheduled, but HEAVILY tracked by financial professionals — not low attention
-- "Will Bitcoin reach $100K by end of year?" → No specific event date
-- "Will [team] win the Super Bowl?" → Major sports, too sharp
-- "Will [politician] win the 2024 election?" → Major election, high attention
-- "Will [big tech company] hit $X market cap?" → Finance-tracked, not niche"""
+include_in_strategy = is_single_event AND has_monotonic_potential AND NOT is_competitive_multioutcome"""
 
 
-MAX_CONCURRENT = 100  # concurrent API requests
+MAX_CONCURRENT = 100
 
 
 async def _classify_market_async(
@@ -135,8 +158,13 @@ async def _classify_market_async(
     market: dict,
     semaphore: asyncio.Semaphore,
 ) -> tuple[dict, dict | None]:
-    """Classify a single market with concurrency control. Returns (market, classification)."""
-    user_content = f"Question: {market['question']}\n\nDescription: {market.get('description', 'N/A')}"
+    """Classify a single market with concurrency control."""
+    user_content = (
+        f"Question: {market['question']}\n\n"
+        f"Description: {market.get('description', 'N/A')[:500]}\n\n"
+        f"Category: {market.get('category', 'N/A')}\n"
+        f"Event group size: {market.get('event_group_size', 1)}"
+    )
 
     async with semaphore:
         for attempt in range(3):
@@ -191,13 +219,9 @@ async def _classify_batch_async(
 
 
 def llm_filter(markets: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Classify markets using DeepSeek with concurrent async calls.
-
-    Caches results to llm_classifications.jsonl.
-    """
+    """Classify markets using DeepSeek with concurrent async calls."""
     cache_path = CACHE_DIR / "llm_classifications.jsonl"
 
-    # Load existing cache
     cached = {}
     if cache_path.exists():
         with open(cache_path, "r", encoding="utf-8") as f:
@@ -216,15 +240,16 @@ def llm_filter(markets: list[dict]) -> tuple[list[dict], list[dict]]:
     all_classifications = []
     to_classify = []
 
-    # Separate cached from uncached
     for m in markets:
         mid = m["id"]
         if mid in cached:
             entry = cached[mid]
             all_classifications.append(entry)
             classification = entry.get("classification", {})
-            if (classification.get("include_in_strategy") and
-                    classification.get("confidence", 0) >= LLM_CONFIDENCE_THRESHOLD):
+            if classification and (
+                classification.get("include_in_strategy")
+                and classification.get("confidence", 0) >= LLM_CONFIDENCE_THRESHOLD
+            ):
                 m_with_llm = dict(m)
                 m_with_llm["_llm"] = classification
                 accepted.append(m_with_llm)
@@ -236,10 +261,8 @@ def llm_filter(markets: list[dict]) -> tuple[list[dict], list[dict]]:
               f"({len(cached)} cached, {MAX_CONCURRENT} concurrent)...")
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Run async classification
         results = asyncio.run(_classify_batch_async(to_classify))
 
-        # Process results and write cache
         with open(cache_path, "a", encoding="utf-8") as cache_f:
             for market, classification in results:
                 entry = {
@@ -248,12 +271,13 @@ def llm_filter(markets: list[dict]) -> tuple[list[dict], list[dict]]:
                     "classification": classification,
                 }
 
-                if classification:
-                    if (classification.get("include_in_strategy") and
-                            classification.get("confidence", 0) >= LLM_CONFIDENCE_THRESHOLD):
-                        m_with_llm = dict(market)
-                        m_with_llm["_llm"] = classification
-                        accepted.append(m_with_llm)
+                if classification and (
+                    classification.get("include_in_strategy")
+                    and classification.get("confidence", 0) >= LLM_CONFIDENCE_THRESHOLD
+                ):
+                    m_with_llm = dict(market)
+                    m_with_llm["_llm"] = classification
+                    accepted.append(m_with_llm)
 
                 all_classifications.append(entry)
                 cache_f.write(json.dumps(entry) + "\n")
@@ -266,11 +290,9 @@ def run_filter_pipeline(markets: list[dict]) -> tuple[list[dict], dict]:
     """Run the full Phase 2 filter pipeline. Returns (filtered_markets, stats)."""
     total = len(markets)
 
-    # Step 2a: Hard filters
     after_hard = [m for m in markets if hard_filter(m)]
     print(f"After hard filters: {len(after_hard)}/{total}")
 
-    # Step 2b: LLM classification
     accepted, classifications = llm_filter(after_hard)
 
     stats = {
