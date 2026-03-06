@@ -9,3 +9,5 @@ data/processed/*.csv
 cache/
 output/
 *.egg-info/
+data/poly_data/
+data/whales/

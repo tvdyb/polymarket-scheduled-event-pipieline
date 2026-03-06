@@ -17,6 +17,8 @@ dependencies = [
   "tqdm>=4.65",
   "numpy>=1.24",
   "httpx>=0.27",
+  "polars>=1.0",
+  "scipy>=1.11",
 ]
 
 [project.scripts]
@@ -24,7 +26,7 @@ polymarket-backtest = "polymarket_backtest.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["polymarket_pipeline*", "polymarket_backtest*"]
+include = ["polymarket_pipeline*", "polymarket_backtest*", "polymarket_backtester*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
