@@ -5,6 +5,7 @@ import json
 
 from .api import PolymarketClient, normalize_history_points
 from .filters import filter_scheduled_markets
+from .llm_filter import apply_llm_filter
 
 
 def _ensure_parent(path: str) -> None:
@@ -48,16 +49,46 @@ def fetch_and_store(config: dict) -> dict:
                 raw_points = client.fetch_price_history(token_id=token_id, interval=interval, fidelity=fidelity)
                 histories[token_id] = normalize_history_points(raw_points)
 
+    # Keep only markets with accessible history on at least one token (prefer YES token when present)
+    scheduled_with_history = []
+    for m in scheduled:
+        tokens = m.get("_tokens", [])
+        yes = next((t for t in tokens if str(t.get("name", "")).lower() in ("yes", "true")), None)
+        check_tokens = [yes] if yes else tokens[:1]
+        has_history = any(histories.get(t.get("token_id"), []) for t in check_tokens if t)
+        if has_history:
+            scheduled_with_history.append(m)
+
     _ensure_parent(paths["raw_histories"])
     with open(paths["raw_histories"], "w", encoding="utf-8") as f:
         json.dump(histories, f, indent=2)
 
+    llm_cfg = config.get("llm", {})
+    decisions = []
+    if llm_cfg.get("enabled", False):
+        scheduled_final, decisions = apply_llm_filter(scheduled_with_history, llm_cfg)
+    else:
+        scheduled_final = scheduled_with_history
+
     _ensure_parent(paths["filtered_markets"])
     with open(paths["filtered_markets"], "w", encoding="utf-8") as f:
-        json.dump(scheduled, f, indent=2)
+        json.dump(scheduled_final, f, indent=2)
+
+    decisions_path = paths.get("llm_decisions", "data/processed/llm_decisions.json")
+    _ensure_parent(decisions_path)
+    with open(decisions_path, "w", encoding="utf-8") as f:
+        json.dump(decisions, f, indent=2)
+
+    error_rejects = sum(1 for d in decisions if d.get("error"))
+    policy_rejects = sum(1 for d in decisions if (not d.get("include")) and (not d.get("error")))
 
     return {
         "markets_fetched": len(markets),
         "scheduled_markets": len(scheduled),
+        "scheduled_with_history": len(scheduled_with_history),
+        "scheduled_after_llm": len(scheduled_final),
+        "llm_policy_rejects": policy_rejects,
+        "llm_error_rejects": error_rejects,
         "histories_fetched": len(histories),
+        "llm_decisions_path": decisions_path,
     }

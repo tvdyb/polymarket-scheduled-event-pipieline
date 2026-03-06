@@ -4,10 +4,10 @@ api:
   request_timeout_seconds: 15
 
 fetch:
-  closed: false
-  limit: 200
+  closed: true
+  limit: 1000
   offset: 0
-  max_markets: 100
+  max_markets: 1000
   include_price_history: true
   history_interval: "max"
   history_fidelity: 60
@@ -32,3 +32,4 @@ paths:
   dataset_csv: "data/processed/scheduled_dataset.csv"
   trades_csv: "data/processed/trades.csv"
   summary_json: "data/processed/backtest_summary.json"
+  llm_decisions: "data/processed/llm_decisions.json"

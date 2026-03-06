@@ -1,0 +1,23 @@
+You are selecting Polymarket contracts for a pre-event execution strategy.
+
+Goal:
+Choose markets where we can buy before a single concrete event and sell shortly before that event, with low pre-event volatility.
+
+Hard requirements:
+1) Single real-world event with a clear timestamp (sports game start, earnings release time, hearing start, launch time, etc.).
+2) Must NOT be generic deadline framing like "before DATE" contracts unless anchored to one concrete event start.
+3) Must have accessible and sufficiently dense market price history in CLOB for the YES token.
+4) Prefer low pre-event variance and stable spread before event start.
+
+Reject patterns:
+- "Will X happen before Jan 1" style open-ended deadline contracts.
+- Multi-event baskets or season-long aggregate outcomes.
+- Markets with sparse/empty history.
+
+Output fields:
+- market_id
+- question
+- event_time_utc
+- yes_token_id
+- suitability_score_0_100
+- rejection_reason (if rejected)

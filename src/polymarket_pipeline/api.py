@@ -99,6 +99,14 @@ def extract_tokens(market: dict[str, Any]) -> list[dict[str, str]]:
             pass
 
     outcomes = market.get("outcomes")
+    if isinstance(outcomes, str):
+        try:
+            parsed_outcomes = json.loads(outcomes)
+            if isinstance(parsed_outcomes, list):
+                outcomes = parsed_outcomes
+        except Exception:
+            pass
+
     if isinstance(outcomes, list):
         for i, outcome in enumerate(outcomes):
             if isinstance(outcome, dict):

@@ -4,7 +4,7 @@ api:
   request_timeout_seconds: 15
 
 fetch:
-  closed: false
+  closed: true
   limit: 200
   offset: 0
   max_markets: 100
@@ -32,3 +32,4 @@ paths:
   dataset_csv: "data/processed/scheduled_dataset.csv"
   trades_csv: "data/processed/trades.csv"
   summary_json: "data/processed/backtest_summary.json"
+  llm_decisions: "data/processed/llm_decisions.json"
