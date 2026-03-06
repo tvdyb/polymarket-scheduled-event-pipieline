@@ -120,7 +120,7 @@ Examples of markets to EXCLUDE (include_in_strategy: false):
 - "Will [big tech company] hit $X market cap?" → Finance-tracked, not niche"""
 
 
-MAX_CONCURRENT = 20  # concurrent API requests
+MAX_CONCURRENT = 100  # concurrent API requests
 
 
 async def _classify_market_async(

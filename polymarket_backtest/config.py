@@ -24,7 +24,7 @@ ENTRY_DAYS_BEFORE = [14, 7, 5, 3]
 EXIT_DAYS_BEFORE = [2, 1, 0]
 
 # Data
-MARKETS_TO_FETCH = 100000  # CLOB only retains ~1 month of price history, so fetch wide
+MARKETS_TO_FETCH = 10000
 CACHE_DIR = Path("./cache")
 OUTPUT_DIR = Path("./output")
 
