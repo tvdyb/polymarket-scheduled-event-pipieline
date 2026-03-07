@@ -22,6 +22,7 @@ class BacktestConfig:
     impact_threshold: float = 0.08   # min price deviation from VWAP to trigger signal
     low_volume_threshold: float = 50_000.0  # only trade in markets below this 24h volume
     min_vwap_trades: int = 5         # min trades in 1h window for VWAP to be meaningful
+    min_trade_size_usd: float = 100.0  # ignore trades below this size for signal detection
 
     # --- Trade management ---
     max_hold_seconds: int = 14400    # 4h max hold

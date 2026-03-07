@@ -42,7 +42,8 @@ def load_data(config: BacktestConfig):
     print("  No sampling — processing every trade.")
     t0 = time.time()
 
-    trades_df = (
+    # Step 1: Load raw trades, normalize prices to YES-side
+    raw_trades = (
         pl.scan_csv(
             DATA_DIR / "processed" / "trades.csv",
             infer_schema_length=10000,
@@ -51,29 +52,46 @@ def load_data(config: BacktestConfig):
         .filter(pl.col("timestamp") < config.end_date)
         .with_columns([
             pl.col("timestamp").str.to_datetime().dt.epoch("s").alias("timestamp_epoch"),
-            pl.col("taker_direction").alias("taker_side"),
             pl.col("usd_amount").alias("size"),
-            pl.when(pl.col("nonusdc_side") == "token1")
-              .then(pl.lit("Yes"))
-              .otherwise(pl.lit("No"))
-              .alias("outcome"),
             # Normalize price to YES-side: if trade is for NO token, YES price = 1 - price
             pl.when(pl.col("nonusdc_side") == "token1")
               .then(pl.col("price"))
               .otherwise(1.0 - pl.col("price"))
               .alias("yes_price"),
         ])
+        .collect()
+    )
+
+    # Step 2: Aggregate trades at the same (timestamp, market) into one VWAP event.
+    # Individual CLOB fills within a single order sweep are not separate price signals —
+    # they represent one order filling at multiple book levels. Aggregating prevents
+    # deep-book fills (e.g. $0.22 in a market trading at $0.40) from creating false signals.
+    trades_df = (
+        raw_trades
+        .group_by(["timestamp_epoch", "market_id"])
+        .agg([
+            # Volume-weighted YES price across all fills at this timestamp
+            (pl.col("yes_price") * pl.col("size")).sum().alias("_notional"),
+            pl.col("size").sum().alias("size"),
+            pl.col("taker_direction").first().alias("taker_side"),
+            pl.first("maker").alias("maker"),
+            pl.first("taker").alias("taker"),
+        ])
+        .with_columns([
+            (pl.col("_notional") / pl.col("size")).alias("price"),
+            pl.lit("Yes").alias("outcome"),  # outcome not meaningful after aggregation
+        ])
         .select([
             pl.col("timestamp_epoch").alias("timestamp"),
-            pl.col("market_id").cast(pl.Utf8).alias("market_id"),
-            pl.col("yes_price").alias("price"),
+            pl.col("market_id").cast(pl.Utf8),
+            "price",
             "size",
             "taker_side",
             "outcome",
             "maker",
             "taker",
         ])
-        .collect()
+        .sort("timestamp")
     )
 
     elapsed = time.time() - t0

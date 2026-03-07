@@ -126,10 +126,15 @@ class LiquidityReversionBacktester:
             self.position_manager.check_exits(ts, market_id, price, resolution_ts)
 
             # 4. Detect new impact signals (compare vs 1h VWAP)
-            signal = self.impact_detector.on_trade(
-                ts, market_id, price, snapshot.volume_24h, snapshot.vwap_1h,
-                snapshot.trade_count_1h,
-            )
+            #    Skip tiny trades — individual CLOB fills below the size threshold
+            #    are noise (stale limits, deep book picks) not real price signals.
+            if size < self.config.min_trade_size_usd:
+                signal = None
+            else:
+                signal = self.impact_detector.on_trade(
+                    ts, market_id, price, snapshot.volume_24h, snapshot.vwap_1h,
+                    snapshot.trade_count_1h,
+                )
 
             if signal:
                 self._total_signals += 1
