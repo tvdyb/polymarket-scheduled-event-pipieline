@@ -127,6 +127,14 @@ class FillSimulator:
 
         fill_price = max(fill_price, 0.001)
 
+        # Enforce adverse slippage only: fill can never be more favorable
+        # than signal price. For BUY: fill >= signal (you pay at least what
+        # you expected). For SELL: fill <= signal.
+        if order.direction == "BUY":
+            fill_price = max(fill_price, order.signal_price)
+        else:
+            fill_price = min(fill_price, order.signal_price)
+
         slippage_bps = abs(fill_price - order.signal_price) / order.signal_price * 10_000 if order.signal_price > 0 else 0
 
         return Fill(

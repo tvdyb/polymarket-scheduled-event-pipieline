@@ -57,11 +57,16 @@ def load_data(config: BacktestConfig):
               .then(pl.lit("Yes"))
               .otherwise(pl.lit("No"))
               .alias("outcome"),
+            # Normalize price to YES-side: if trade is for NO token, YES price = 1 - price
+            pl.when(pl.col("nonusdc_side") == "token1")
+              .then(pl.col("price"))
+              .otherwise(1.0 - pl.col("price"))
+              .alias("yes_price"),
         ])
         .select([
             pl.col("timestamp_epoch").alias("timestamp"),
             pl.col("market_id").cast(pl.Utf8).alias("market_id"),
-            "price",
+            pl.col("yes_price").alias("price"),
             "size",
             "taker_side",
             "outcome",
