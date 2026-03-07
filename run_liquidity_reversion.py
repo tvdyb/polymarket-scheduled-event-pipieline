@@ -2,8 +2,14 @@
 
 Processes ALL trades (no sampling), with latency-aware fills,
 notional sizing, resolution filters, and concentration limits.
+
+Usage:
+  python run_liquidity_reversion.py              # in-sample (Jul-Oct 2024)
+  python run_liquidity_reversion.py --oos        # out-of-sample (Jan-Apr 2025)
+  python run_liquidity_reversion.py --both       # run both and compare
 """
 
+import argparse
 import json
 import time
 from pathlib import Path
@@ -17,8 +23,6 @@ from polymarket_backtester.liquidity_reversion.reporting import (
 )
 
 DATA_DIR = Path("./data/poly_data")
-OUTPUT_DIR = Path("./output/liquidity_reversion")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_data(config: BacktestConfig):
@@ -74,12 +78,18 @@ def load_data(config: BacktestConfig):
     return markets_df, trades_df
 
 
-def main():
-    config = BacktestConfig()
+def run_backtest(config: BacktestConfig, label: str):
+    """Run a single backtest with given config and label."""
+    output_dir = Path(f"./output/liquidity_reversion/{label}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     markets_df, trades_df = load_data(config)
 
-    print(f"\nRunning liquidity reversion backtest...")
+    print(f"\n{'='*70}")
+    print(f"  Running: {label} ({config.start_date} to {config.end_date})")
+    print(f"{'='*70}")
     print(f"  Config: sizing={config.sizing_mode}, max_notional={config.max_notional}")
+    print(f"  Impact threshold: {config.impact_threshold}, min VWAP trades: {config.min_vwap_trades}")
     print(f"  Latency: {config.latency_trades} trades / {config.latency_seconds}s, "
           f"fill depth: {config.fill_depth_trades}, timeout: {config.fill_timeout_seconds}s")
     print(f"  Entry band: [{config.entry_price_min}, {config.entry_price_max}]")
@@ -91,25 +101,80 @@ def main():
     bt.load_markets(markets_df)
     metrics = bt.run(trades_df, show_progress=True)
 
-    # Print report
     print_metrics(metrics)
 
-    # Write trade log
-    trade_log_path = OUTPUT_DIR / "trade_log.csv"
-    write_trade_log(bt.position_manager.closed_trades, trade_log_path)
-    print(f"\nTrade log: {trade_log_path}")
+    write_trade_log(bt.position_manager.closed_trades, output_dir / "trade_log.csv")
+    write_equity_curve(bt._equity_curve, output_dir / "equity_curve.csv")
 
-    # Write equity curve
-    equity_path = OUTPUT_DIR / "equity_curve.csv"
-    write_equity_curve(bt._equity_curve, equity_path)
-    print(f"Equity curve: {equity_path}")
-
-    # Write metrics JSON
-    metrics_path = OUTPUT_DIR / "metrics.json"
     save_metrics = {k: v for k, v in metrics.items() if not isinstance(v, (set, type))}
-    with open(metrics_path, "w") as f:
+    with open(output_dir / "metrics.json", "w") as f:
         json.dump(save_metrics, f, indent=2, default=str)
-    print(f"Metrics: {metrics_path}")
+
+    print(f"\nOutputs saved to {output_dir}/")
+    return metrics
+
+
+def print_comparison(is_metrics: dict, oos_metrics: dict):
+    """Print side-by-side comparison of in-sample vs out-of-sample."""
+    print(f"\n\n{'='*80}")
+    print("  IN-SAMPLE vs OUT-OF-SAMPLE COMPARISON")
+    print(f"{'='*80}")
+    print(f"{'Metric':<30} {'In-Sample':>18} {'Out-of-Sample':>18} {'Delta':>12}")
+    print("-" * 80)
+
+    rows = [
+        ("Gross PnL", "gross_pnl", "${:>+14,.2f}"),
+        ("Net PnL", "net_pnl", "${:>+14,.2f}"),
+        ("Transaction Costs", "transaction_costs", "${:>14,.2f}"),
+        ("Win Rate", "win_rate", "{:>14.1%}"),
+        ("Profit Factor", "profit_factor", "{:>14.2f}"),
+        ("Sharpe (annualized)", "sharpe", "{:>14.2f}"),
+        ("Max Drawdown", "max_drawdown", "${:>14,.2f}"),
+        ("Total Trades", "total_trades", "{:>14,}"),
+        ("Signals Generated", "total_signals_generated", "{:>14,}"),
+        ("Fill Rate", "fill_rate", "{:>14.1%}"),
+        ("Avg Hold (hours)", "avg_hold_hours", "{:>14.1f}"),
+        ("Avg Winner", "avg_winner", "${:>+14,.2f}"),
+        ("Avg Loser", "avg_loser", "${:>+14,.2f}"),
+    ]
+
+    for label, key, fmt in rows:
+        is_val = is_metrics.get(key, 0)
+        oos_val = oos_metrics.get(key, 0)
+        try:
+            is_str = fmt.format(is_val)
+            oos_str = fmt.format(oos_val)
+            if isinstance(is_val, (int, float)) and isinstance(oos_val, (int, float)) and is_val != 0:
+                delta_pct = (oos_val - is_val) / abs(is_val) * 100
+                delta_str = f"{delta_pct:>+10.1f}%"
+            else:
+                delta_str = ""
+        except (ValueError, TypeError):
+            is_str = str(is_val)[:18]
+            oos_str = str(oos_val)[:18]
+            delta_str = ""
+        print(f"  {label:<28} {is_str:>18} {oos_str:>18} {delta_str:>12}")
+
+    print(f"{'='*80}\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Liquidity Reversion Backtest")
+    parser.add_argument("--oos", action="store_true", help="Run out-of-sample only (Jan-Apr 2025)")
+    parser.add_argument("--both", action="store_true", help="Run both in-sample and out-of-sample")
+    args = parser.parse_args()
+
+    is_config = BacktestConfig(start_date="2024-07-01", end_date="2024-10-01")
+    oos_config = BacktestConfig(start_date="2025-01-01", end_date="2025-04-01")
+
+    if args.both:
+        is_metrics = run_backtest(is_config, "in_sample")
+        oos_metrics = run_backtest(oos_config, "out_of_sample")
+        print_comparison(is_metrics, oos_metrics)
+    elif args.oos:
+        run_backtest(oos_config, "out_of_sample")
+    else:
+        run_backtest(is_config, "in_sample")
 
 
 if __name__ == "__main__":

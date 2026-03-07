@@ -37,6 +37,7 @@ class ClosedPosition:
     exit_reason: str           # target_hit, stop_loss, timeout, forced_resolution_exit, market_close
     slippage_bps: float
     entry_notional: float
+    exit_notional: float
 
 
 class PositionManager:
@@ -48,6 +49,7 @@ class PositionManager:
         self.max_notional_per_market = config.max_notional_per_market
         self.max_total = config.max_total_positions
         self.forced_exit_seconds = config.forced_exit_hours * 3600
+        self.exit_spread = config.exit_spread_cents
 
         self._positions: dict[str, list[OpenPosition]] = {}  # market_id -> [positions]
         self._closed: list[ClosedPosition] = []
@@ -112,7 +114,10 @@ class PositionManager:
 
     def check_exits(self, timestamp: int, market_id: str, yes_price: float,
                     resolution_ts: int | None) -> list[ClosedPosition]:
-        """Check all positions in a market for exit conditions."""
+        """Check all positions in a market for exit conditions.
+
+        Applies exit spread to simulate realistic exit fills.
+        """
         if market_id not in self._positions:
             return []
 
@@ -122,11 +127,18 @@ class PositionManager:
         for pos in self._positions[market_id]:
             reason = self._should_exit(pos, timestamp, yes_price, resolution_ts)
             if reason:
-                exit_price = (1.0 - yes_price) if pos.side == "NO" else yes_price
-                exit_price = max(exit_price, 0.0)
+                # Side-adjusted exit price WITH spread penalty
+                if pos.side == "NO":
+                    raw_exit = 1.0 - yes_price
+                else:
+                    raw_exit = yes_price
+                # Apply spread: selling gets worse price
+                exit_price = max(raw_exit - self.exit_spread, 0.0)
+
                 pnl = (exit_price - pos.entry_price) * pos.shares
                 proceeds = pos.shares * exit_price
                 self._cash += proceeds
+                exit_notional = pos.shares * exit_price
 
                 closed = ClosedPosition(
                     market_id=pos.market_id,
@@ -143,6 +155,7 @@ class PositionManager:
                     exit_reason=reason,
                     slippage_bps=abs(pos.entry_price - pos.signal_price) / pos.signal_price * 10_000 if pos.signal_price > 0 else 0,
                     entry_notional=pos.entry_notional,
+                    exit_notional=exit_notional,
                 )
                 self._closed.append(closed)
                 exits.append(closed)
@@ -160,7 +173,7 @@ class PositionManager:
                      resolution_ts: int | None) -> str | None:
         """Determine if a position should exit and why."""
         # Forced exit near resolution
-        if resolution_ts and resolution_ts - timestamp < self.forced_exit_seconds:
+        if resolution_ts and resolution_ts > 0 and resolution_ts - timestamp < self.forced_exit_seconds:
             return "forced_resolution_exit"
 
         # Reversion target hit (target is in YES-price space)
@@ -175,10 +188,56 @@ class PositionManager:
 
         return None
 
+    def unrealized_pnl(self, market_prices: dict[str, float]) -> float:
+        """Compute unrealized PnL from open positions given YES prices."""
+        total = 0.0
+        for positions in self._positions.values():
+            for pos in positions:
+                yes_price = market_prices.get(pos.market_id, 0.5)
+                if pos.side == "NO":
+                    mark = 1.0 - yes_price
+                else:
+                    mark = yes_price
+                total += (mark - pos.entry_price) * pos.shares
+        return total
+
     def force_close_all(self, timestamp: int, market_prices: dict[str, float]) -> list[ClosedPosition]:
-        """Force-close all remaining positions at current prices."""
+        """Force-close all remaining positions at current prices (end-of-data)."""
         exits: list[ClosedPosition] = []
         for market_id in list(self._positions.keys()):
             yes_price = market_prices.get(market_id, 0.5)
-            exits.extend(self.check_exits(timestamp, market_id, yes_price, resolution_ts=0))
+            # Close remaining positions directly with market_close reason
+            if market_id not in self._positions:
+                continue
+            for pos in self._positions[market_id]:
+                if pos.side == "NO":
+                    raw_exit = 1.0 - yes_price
+                else:
+                    raw_exit = yes_price
+                exit_price = max(raw_exit - self.exit_spread, 0.0)
+                pnl = (exit_price - pos.entry_price) * pos.shares
+                proceeds = pos.shares * exit_price
+                self._cash += proceeds
+
+                closed = ClosedPosition(
+                    market_id=pos.market_id,
+                    side=pos.side,
+                    shares=pos.shares,
+                    signal_time=pos.signal_time,
+                    signal_price=pos.signal_price,
+                    fill_time=pos.entry_time,
+                    entry_price=pos.entry_price,
+                    exit_time=timestamp,
+                    exit_price=exit_price,
+                    pnl=pnl,
+                    hold_seconds=timestamp - pos.entry_time,
+                    exit_reason="market_close",
+                    slippage_bps=abs(pos.entry_price - pos.signal_price) / pos.signal_price * 10_000 if pos.signal_price > 0 else 0,
+                    entry_notional=pos.entry_notional,
+                    exit_notional=pos.shares * exit_price,
+                )
+                self._closed.append(closed)
+                exits.append(closed)
+            del self._positions[market_id]
+
         return exits

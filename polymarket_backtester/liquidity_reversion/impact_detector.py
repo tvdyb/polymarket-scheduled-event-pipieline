@@ -1,7 +1,7 @@
 """Signal detection: identifies price dislocations from trade flow.
 
-This is the core signal logic — NOT modified per the spec.
-Extracted from the original LiquidityReversionStrategy.on_trade entry logic.
+Compares current trade price against the 1h VWAP (not the previous
+single trade) to distinguish real dislocations from bid-ask bounce.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ class ImpactSignal:
     """A detected price dislocation that may warrant a fade trade."""
     timestamp: int
     market_id: str
-    impact: float              # signed price move (positive = price went up)
-    prev_price: float          # price before impact
+    impact: float              # signed price move vs VWAP
+    reference_price: float     # VWAP used as reference
     trigger_price: float       # price that triggered the signal (YES price)
     fade_side: str             # "YES" or "NO" — the side to buy to fade
     target_price: float        # YES price at which reversion target is hit
@@ -25,11 +25,11 @@ class ImpactSignal:
 
 
 class ImpactDetector:
-    """Monitors trade-to-trade price impacts and emits fade signals.
+    """Monitors trade prices vs rolling VWAP and emits fade signals.
 
-    Signal logic (unchanged from original):
-    - Track previous price per market
-    - If |price_move| >= impact_threshold AND market volume < low_volume_threshold
+    Signal logic:
+    - Compare current trade price against 1h VWAP (not prev single trade)
+    - If |deviation| >= impact_threshold AND market volume < threshold
     - AND price not near extremes — emit a fade signal
     """
 
@@ -37,23 +37,24 @@ class ImpactDetector:
         self.impact_threshold = config.impact_threshold
         self.low_volume_threshold = config.low_volume_threshold
         self.reversion_pct = config.reversion_target_pct
-        self._prev_prices: dict[str, float] = {}
+        self.min_vwap_trades = config.min_vwap_trades
 
     def on_trade(self, timestamp: int, market_id: str, price: float,
-                 volume_24h: float) -> ImpactSignal | None:
+                 volume_24h: float, vwap_1h: float,
+                 trade_count_1h: int) -> ImpactSignal | None:
         """Process a trade and return a signal if impact detected.
 
         Args:
             price: YES-side price of the trade
             volume_24h: trailing 24h volume for the market
+            vwap_1h: 1-hour VWAP for the market
+            trade_count_1h: number of trades in last hour
         """
-        prev = self._prev_prices.get(market_id)
-        self._prev_prices[market_id] = price
-
-        if prev is None:
+        # Need enough trades for VWAP to be meaningful
+        if trade_count_1h < self.min_vwap_trades:
             return None
 
-        impact = price - prev
+        impact = price - vwap_1h
 
         if abs(impact) < self.impact_threshold:
             return None
@@ -65,13 +66,13 @@ class ImpactDetector:
         if price < 0.05 or price > 0.95:
             return None
 
-        # Fade the move
+        # Fade the move: revert toward VWAP
         if impact > 0:
             fade_side = "NO"
-            target = prev + impact * (1.0 - self.reversion_pct)
+            target = vwap_1h + impact * (1.0 - self.reversion_pct)
         else:
             fade_side = "YES"
-            target = prev + impact * (1.0 - self.reversion_pct)
+            target = vwap_1h + impact * (1.0 - self.reversion_pct)
 
         entry_price = (1.0 - price) if fade_side == "NO" else price
 
@@ -82,7 +83,7 @@ class ImpactDetector:
             timestamp=timestamp,
             market_id=market_id,
             impact=impact,
-            prev_price=prev,
+            reference_price=vwap_1h,
             trigger_price=price,
             fade_side=fade_side,
             target_price=target,

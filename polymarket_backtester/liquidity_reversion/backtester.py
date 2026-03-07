@@ -1,10 +1,10 @@
 """Main backtest loop for liquidity reversion strategy.
 
 Architecture:
-  ImpactDetector  -> detects signals (untouched signal logic)
-  FillSimulator   -> latency + VWAP fill simulation
-  PositionSizer   -> notional sizing + volume caps
-  PositionManager -> risk limits, exits, position tracking
+  ImpactDetector  -> detects signals (vs 1h VWAP, not prev trade)
+  FillSimulator   -> latency + VWAP fill simulation (per-market counters)
+  PositionSizer   -> notional sizing + volume caps (share-equivalent)
+  PositionManager -> risk limits, exits with spread, position tracking
 
 The loop processes ALL trades sequentially (no sampling).
 """
@@ -47,8 +47,8 @@ class LiquidityReversionBacktester:
         self._filter_counts: dict[str, int] = defaultdict(int)
         self._equity_curve: list[dict] = []
         self._last_equity_day: int = 0
-        # Track which markets have active fades in the fill simulator
-        self._pending_fade_markets: set[str] = set()
+        # Track pending orders per market: market_id -> {side, signal_price}
+        self._pending_orders: dict[str, dict] = {}
 
     def load_markets(self, markets_df: pl.DataFrame):
         """Register market metadata (resolution times, categories)."""
@@ -85,6 +85,7 @@ class LiquidityReversionBacktester:
 
         trades = trades_df.sort("timestamp")
         total_rows = len(trades)
+        ts = 0
 
         iterator = trades.iter_rows(named=True)
         if show_progress:
@@ -115,7 +116,7 @@ class LiquidityReversionBacktester:
             # 2. Process pending fills in the fill simulator
             fills, cancelled = self.fill_simulator.on_trade(ts, market_id, price, size)
             for c in cancelled:
-                self._pending_fade_markets.discard(c.market_id)
+                self._pending_orders.pop(c.market_id, None)
                 self._filter_counts["fill_timeout"] += 1
             for fill in fills:
                 self._process_fill(fill)
@@ -124,9 +125,10 @@ class LiquidityReversionBacktester:
             resolution_ts = snapshot.resolution_ts
             self.position_manager.check_exits(ts, market_id, price, resolution_ts)
 
-            # 4. Detect new impact signals
+            # 4. Detect new impact signals (compare vs 1h VWAP)
             signal = self.impact_detector.on_trade(
-                ts, market_id, price, snapshot.volume_24h
+                ts, market_id, price, snapshot.volume_24h, snapshot.vwap_1h,
+                snapshot.trade_count_1h,
             )
 
             if signal:
@@ -158,9 +160,12 @@ class LiquidityReversionBacktester:
                                 max_shares=shares,
                                 target_price=signal.target_price,
                             )
-                            self._pending_fade_markets.add(market_id)
+                            self._pending_orders[market_id] = {
+                                "side": signal.fade_side,
+                                "signal_price": signal.entry_price,
+                            }
 
-            # 5. Daily equity snapshot
+            # 5. Daily equity snapshot (with unrealized PnL)
             day = ts // 86400
             if day > self._last_equity_day:
                 self._record_equity(ts)
@@ -191,7 +196,7 @@ class LiquidityReversionBacktester:
     def _process_fill(self, fill: Fill):
         """Handle a completed fill from the simulator."""
         self._total_fills += 1
-        self._pending_fade_markets.discard(fill.market_id)
+        self._pending_orders.pop(fill.market_id, None)
 
         # Re-check risk limits at fill time (state may have changed)
         cost = fill.shares * fill.fill_price
@@ -215,23 +220,35 @@ class LiquidityReversionBacktester:
             if time_to_close < self.config.resolution_proximity_hours * 3600:
                 return "resolution_proximity"
 
-        # Already have a pending order for this market
-        if signal.market_id in self._pending_fade_markets:
-            return "pending_order_exists"
+        # Check for existing pending order on this market
+        existing = self._pending_orders.get(signal.market_id)
+        if existing:
+            # Allow if different direction or price moved significantly
+            same_side = existing["side"] == signal.fade_side
+            price_close = abs(existing["signal_price"] - signal.entry_price) < 0.03
+            if same_side and price_close:
+                return "pending_order_exists"
 
         return None
 
     def _record_equity(self, timestamp: int):
-        """Snapshot equity curve at daily granularity."""
+        """Snapshot equity curve at daily granularity, including unrealized PnL."""
         open_positions = self.position_manager.total_open
         total_notional = sum(
             p.entry_notional for p in self.position_manager.open_positions
         )
-        cumulative_pnl = sum(t.pnl for t in self.position_manager.closed_trades)
+        realized_pnl = sum(t.pnl for t in self.position_manager.closed_trades)
+
+        # Mark-to-market open positions
+        market_prices = {
+            mid: s.last_price
+            for mid, s in self.market_state.get_all_snapshots().items()
+        }
+        unrealized_pnl = self.position_manager.unrealized_pnl(market_prices)
 
         self._equity_curve.append({
             "timestamp": timestamp,
-            "cumulative_pnl": cumulative_pnl,
+            "cumulative_pnl": realized_pnl + unrealized_pnl,
             "open_positions": open_positions,
             "total_notional_exposure": total_notional,
         })

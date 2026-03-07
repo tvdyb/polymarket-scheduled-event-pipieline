@@ -19,8 +19,9 @@ class BacktestConfig:
     volume_cap_pct: float = 0.02     # cap position at % of trailing 1h volume
 
     # --- Signal detection (impact detector) ---
-    impact_threshold: float = 0.05   # min price move to trigger signal
+    impact_threshold: float = 0.08   # min price deviation from VWAP to trigger signal
     low_volume_threshold: float = 50_000.0  # only trade in markets below this 24h volume
+    min_vwap_trades: int = 5         # min trades in 1h window for VWAP to be meaningful
 
     # --- Trade management ---
     max_hold_seconds: int = 14400    # 4h max hold
@@ -39,6 +40,7 @@ class BacktestConfig:
 
     # --- Costs ---
     transaction_cost_pct: float = 0.01  # 1% round-trip estimate
+    exit_spread_cents: float = 0.02    # spread penalty applied on exit fills
 
     # --- Portfolio ---
     initial_cash: float = 10_000.0

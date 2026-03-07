@@ -32,7 +32,8 @@ def compute_metrics(closed: list[ClosedPosition], equity_curve: list[dict],
     # Gross / Net PnL
     gross_pnl = sum(t.pnl for t in closed)
     total_entry_notional = sum(t.entry_notional for t in closed)
-    transaction_costs = total_entry_notional * config.transaction_cost_pct
+    total_exit_notional = sum(t.exit_notional for t in closed)
+    transaction_costs = (total_entry_notional + total_exit_notional) * config.transaction_cost_pct
     net_pnl = gross_pnl - transaction_costs
 
     result["gross_pnl"] = gross_pnl
